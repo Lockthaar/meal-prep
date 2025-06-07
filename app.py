@@ -1,278 +1,305 @@
 import streamlit as st
-import pandas as pd
 import json
-from collections import defaultdict
+from pathlib import Path
 
-# ----------------------------------------------------------------
-# INITIALISATION DU STATE
-# ----------------------------------------------------------------
+# ———————————————————————————
+# CONFIGURATION
+# ———————————————————————————
+st.set_page_config(page_title="Batchist", layout="wide")
 
-# DataFrame des recettes (Name, Ingredients (JSON), Instructions)
-if "recipes_df" not in st.session_state:
-    st.session_state.recipes_df = pd.DataFrame(columns=["Name", "Ingredients", "Instructions"])
+DATA_DIR = Path(st.secrets.get("DATA_DIR", "."))
+for fn in ("recipes.json","extras.json","plans.json","profiles.json"):
+    f = DATA_DIR / fn
+    if not f.exists():
+        f.write_text("{}")
 
-# DataFrame du planning des repas
-if "mealplan_df" not in st.session_state:
-    st.session_state.mealplan_df = pd.DataFrame(columns=["Day", "Meal", "Recipe"])
+def load_json(path):
+    return json.loads(path.read_text())
 
-# Compteur de lignes d'ingrédients pour le formulaire
-if "ing_count" not in st.session_state:
-    st.session_state.ing_count = 1  # On commence avec une seule ligne
+def save_json(path, data):
+    path.write_text(json.dumps(data, indent=2))
 
-# ----------------------------------------------------------------
-# FONCTION UTILITAIRE DE PARSAGE DES INGREDIENTS
-# ----------------------------------------------------------------
-@st.cache_data
-def parse_ingredients(ing_str: str):
-    """
-    Convertit la chaîne JSON enregistrée dans 'Ingredients' en liste de dict.
-    """
-    try:
-        return json.loads(ing_str)
-    except:
-        return []
+# ———————————————————————————
+# AUTHENTIFICATION EN MÉMOIRE
+# ———————————————————————————
+if "users" not in st.session_state:
+    st.session_state["users"] = {}
 
-# ----------------------------------------------------------------
-# INTERFACE PRINCIPALE
-# ----------------------------------------------------------------
-st.set_page_config(page_title="Meal Planner", layout="wide")
-st.title("Meal Planner Application")
+def register_user(u,p):
+    if u in st.session_state["users"]:
+        return False
+    st.session_state["users"][u] = {"password":p}
+    return True
 
-# Menu de navigation
-section = st.sidebar.selectbox("Choisir une section", ["Recettes", "Planificateur", "Liste de courses", "Impression"])
+def check_login(u,p):
+    return u in st.session_state["users"] and st.session_state["users"][u]["password"]==p
 
-# ----------------------------------------------------------------
-# SECTION 1 : GÉRER LES RECETTES (AJOUT / AFFICHAGE / SUPPRESSION)
-# ----------------------------------------------------------------
-if section == "Recettes":
-    st.header("Ajouter / Voir les recettes")
+def do_logout():
+    del st.session_state["user"]
+    st.experimental_rerun()
 
-    st.write("**1. Ajouter une nouvelle recette**")
-    with st.expander("🆕 Ajouter une nouvelle recette"):
-        # Champ pour le nom de la recette
-        name = st.text_input("Nom de la recette", key="new_name")
+# ———————————————————————————
+# ÉCRAN CONNEXION / INSCRIPTION
+# ———————————————————————————
+if "user" not in st.session_state:
+    st.title("🔒 Connexion / Inscription")
+    mode = st.radio("", ["Connexion","Inscription"], horizontal=True)
 
-        # Gestion dynamique du nombre de lignes d'ingrédients
-        st.write("**Ingrédients**")
-        st.write("Pour ajouter une nouvelle ligne :")
-        if st.button("➕ Ajouter une ligne d’ingrédient"):
-            st.session_state.ing_count += 1
-
-        # Construction du formulaire : ing_count lignes
-        ingrédients_temp = []
-        unités_dispo = ["mg", "g", "kg", "cl", "dl", "l", "pièce(s)"]
-
-        for i in range(st.session_state.ing_count):
-            c1, c2, c3 = st.columns([4, 2, 2])
-            with c1:
-                ingr_i = st.text_input(f"Ingrédient #{i+1}", key=f"ing_nom_{i}")
-            with c2:
-                qty_i = st.number_input(f"Quantité #{i+1}", min_value=0.0, format="%.2f", key=f"ing_qty_{i}")
-            with c3:
-                unit_i = st.selectbox(f"Unité #{i+1}", unités_dispo, key=f"ing_unit_{i}")
-
-            ingrédients_temp.append((ingr_i, qty_i, unit_i))
-
-        # Champ d'instructions
-        instructions = st.text_area("Instructions", key="new_instructions")
-
-        # Bouton pour enregistrer la recette
-        if st.button("💾 Enregistrer la recette", key="save_recipe"):
-            # Vérifie que le nom n’est pas vide et qu’il n’existe pas déjà
-            if not name.strip():
-                st.error("Le nom de la recette ne peut pas être vide.")
-            elif name in st.session_state.recipes_df["Name"].tolist():
-                st.error(f"Une recette appelée '{name}' existe déjà.")
+    if mode=="Inscription":
+        with st.form("form_reg"):
+            nom = st.text_input("Nom d'utilisateur")
+            mdp = st.text_input("Mot de passe", type="password")
+            ok  = st.form_submit_button("S'inscrire")
+        if ok:
+            if not nom or not mdp:
+                st.error("Remplissez tous les champs.")
+            elif register_user(nom.strip(), mdp):
+                st.success("Inscription réussie ! Connectez-vous.")
             else:
-                # On filtre les lignes d’ingrédient où le nom est non vide et quantité > 0
-                ingrédients_list = []
-                for ingr_i, qty_i, unit_i in ingrédients_temp:
-                    if ingr_i.strip() != "" and qty_i > 0:
-                        ingrédients_list.append({
-                            "ingredient": ingr_i.strip(),
-                            "quantity": float(qty_i),
-                            "unit": unit_i
-                        })
+                st.error("Nom déjà pris.")
+        st.stop()
 
-                # Si aucun ingrédient valide, affiche une erreur
-                if len(ingrédients_list) == 0:
-                    st.error("Veuillez remplir au moins un ingrédient valide (nom non vide et quantité > 0).")
-                else:
-                    # Création du dict pour la nouvelle ligne
-                    new_row = {
-                        "Name": name.strip(),
-                        "Ingredients": json.dumps(ingrédients_list, ensure_ascii=False),
-                        "Instructions": instructions.strip()
-                    }
+    # Connexion
+    with st.form("form_login"):
+        nom = st.text_input("Nom d'utilisateur")
+        mdp = st.text_input("Mot de passe", type="password")
+        ok  = st.form_submit_button("Se connecter")
+    if ok:
+        if check_login(nom.strip(), mdp):
+            st.session_state.user = nom.strip()
+            st.experimental_rerun()
+        else:
+            st.error("Identifiants incorrects.")
+    st.stop()
 
-                    # Ajout au DataFrame via pd.concat
-                    st.session_state.recipes_df = pd.concat(
-                        [st.session_state.recipes_df, pd.DataFrame([new_row])],
-                        ignore_index=True
-                    )
+# ———————————————————————————
+# MENU PRINCIPAL
+# ———————————————————————————
+user = st.session_state.user
+st.sidebar.write(f"👤 Connecté en tant que **{user}**")
+menu = st.sidebar.radio("Navigation",
+    ["Accueil","Mes recettes","Extras","Planificateur","Liste de courses","Conseils","Profil","Se déconnecter"])
+if menu=="Se déconnecter":
+    do_logout()
 
-                    st.success(f"Recette '{name}' ajoutée.")
+# ———————————————————————————
+# CHARGEMENT DES JSON
+# ———————————————————————————
+RECIPES_FILE  = DATA_DIR / "recipes.json"
+EXTRAS_FILE   = DATA_DIR / "extras.json"
+PLANS_FILE    = DATA_DIR / "plans.json"
+PROFILES_FILE = DATA_DIR / "profiles.json"
 
-                    # ----------------------------
-                    # RÉINITIALISATION DU FORMULAIRE
-                    # ----------------------------
-                    # On supprime la clé "new_name" si elle est présente
-                    if "new_name" in st.session_state:
-                        del st.session_state["new_name"]
-                    # On supprime la clé "new_instructions" si elle est présente
-                    if "new_instructions" in st.session_state:
-                        del st.session_state["new_instructions"]
-                    # Pour chaque ligne d’ingrédient, on supprime les clés utilisées
-                    for j in range(st.session_state.ing_count):
-                        for field in (f"ing_nom_{j}", f"ing_qty_{j}", f"ing_unit_{j}"):
-                            if field in st.session_state:
-                                del st.session_state[field]
-                    # On remet le compteur d’ingrédients à 1
-                    st.session_state.ing_count = 1
+recipes_db  = load_json(RECIPES_FILE)
+extras_db   = load_json(EXTRAS_FILE)
+plans_db    = load_json(PLANS_FILE)
+profiles_db = load_json(PROFILES_FILE)
 
-                    # On relance l’app pour que les champs se resetent
-                    st.experimental_rerun()
+for db in (recipes_db,extras_db,plans_db,profiles_db):
+    db.setdefault(user, {})
 
-    st.markdown("---")
-    st.write("**2. Liste des recettes existantes**")
-    if st.session_state.recipes_df.empty:
-        st.info("Aucune recette disponible.")
-    else:
-        # Affichage de chaque recette avec son bouton de suppression
-        for idx, row in st.session_state.recipes_df.iterrows():
-            col1, col2 = st.columns([8, 1])
-            with col1:
-                st.markdown(f"### {row['Name']}")
-                # Affiche la liste des ingrédients
-                ingrédients = parse_ingredients(row["Ingredients"])
-                for ing in ingrédients:
-                    st.write(f"- {ing['ingredient']}: {ing['quantity']} {ing['unit']}")
-                st.write("**Instructions :**")
-                st.write(row["Instructions"])
-            with col2:
-                # Bouton supprimer (clé unique par idx pour ne pas colliser)
-                if st.button("🗑️ Supprimer", key=f"delete_{idx}"):
-                    # Supprime la ligne du DataFrame et réindexe
-                    df = st.session_state.recipes_df.drop(idx).reset_index(drop=True)
-                    st.session_state.recipes_df = df
-                    st.experimental_rerun()  # relance l’app pour actualiser l’affichage
-            st.markdown("---")
+# recettes/extras doivent être des listes
+recipes_db[user] = recipes_db[user] or []
+extras_db[user]  = extras_db[user]  or []
 
-# ----------------------------------------------------------------
-# SECTION 2 : PLANIFICATEUR DE LA SEMAINE
-# ----------------------------------------------------------------
-elif section == "Planificateur":
-    st.header("Planifier les repas de la semaine")
-    days = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanche"]
-    meals = ["Petit-déjeuner", "Déjeuner", "Dîner"]
+# ———————————————————————————
+# PAGE “ACCUEIL”
+# ———————————————————————————
+if menu=="Accueil":
+    st.title("🏠 Accueil")
+    st.write("Bienvenue sur Batchist ! Choisissez un onglet à gauche.")
 
-    with st.form(key="plan_form"):
-        cols = st.columns(3)
-        selections = []
-        for i, day in enumerate(days):
-            # Répartition en trois colonnes
-            col = cols[0] if i < 3 else (cols[1] if i < 6 else cols[2])
-            with col:
-                st.subheader(day)
-                for meal in meals:
-                    recette_choices = [""] + st.session_state.recipes_df["Name"].tolist()
-                    recipe_choice = st.selectbox(
-                        f"{meal} :",
-                        options=recette_choices,
-                        key=f"{day}_{meal}"
-                    )
-                    selections.append((day, meal, recipe_choice))
+# ———————————————————————————
+# PAGE “MES RECETTES”
+# ———————————————————————————
+elif menu=="Mes recettes":
+    st.title("📋 Mes recettes")
 
-        submit = st.form_submit_button("💾 Enregistrer le plan")
+    # INITIALISE LA LISTE D'INGRÉDIENTS
+    if "ings" not in st.session_state:
+        st.session_state.ings = [{"name":"", "qty":0.0, "unit":"g"}]
+
+    # FORMULAIRE D'AJOUT DANS UN EXPANDER
+    with st.expander("+ Ajouter une recette"):
+        with st.form("add_recipe", clear_on_submit=False):
+            name  = st.text_input("Nom de la recette")
+            instr = st.text_area("Instructions", height=100)
+            img   = st.text_input("URL de l'image (placeholder OK)")
+
+            cols = st.columns([3,3])
+            # À GAUCHE : gestion dynamique des ingrédients
+            with cols[0]:
+                if st.button("+ Ingrédient"):
+                    st.session_state.ings.append({"name":"", "qty":0.0, "unit":"g"})
+                for i, ing in enumerate(st.session_state.ings):
+                    c0, c1, c2, c3 = st.columns([3,1,1,1])
+                    ing["name"] = c0.text_input(f"Ingrédient #{i+1}", value=ing["name"], key=f"name_{i}")
+                    ing["qty"]  = c1.number_input(f"Qté", value=ing["qty"], key=f"qty_{i}")
+                    ing["unit"] = c2.selectbox("Unité", ["g","kg","ml","l","pcs"],
+                                              index=["g","kg","ml","l","pcs"].index(ing["unit"]), key=f"unit_{i}")
+                    if c3.button("🗑️", key=f"del_{i}"):
+                        st.session_state.ings.pop(i)
+                        st.experimental_rerun()
+
+            # À DROITE : aperçu en direct
+            with cols[1]:
+                st.markdown("**Aperçu des ingrédients :**")
+                for ing in st.session_state.ings:
+                    st.write(f"- {ing['name']} : {ing['qty']} {ing['unit']}")
+
+            submit = st.form_submit_button("Ajouter la recette")
+
         if submit:
-            df = pd.DataFrame(selections, columns=["Day", "Meal", "Recipe"])
-            # On enlève les choix vides
-            df = df[df["Recipe"] != ""].reset_index(drop=True)
-            st.session_state.mealplan_df = df
-            st.success("Plan de la semaine enregistré.")
+            if not name.strip():
+                st.error("Le nom est obligatoire.")
+            else:
+                recipes_db[user].append({
+                    "name": name.strip(),
+                    "instr": instr,
+                    "img": img,
+                    "ings": st.session_state.ings.copy()
+                })
+                save_json(RECIPES_FILE, recipes_db)
+                st.success("Recette ajoutée !")
+                st.session_state.ings = [{"name":"", "qty":0.0, "unit":"g"}]
+                st.experimental_rerun()
 
-    st.markdown("**Plan actuel**")
-    if st.session_state.mealplan_df.empty:
-        st.info("Aucun plan enregistré.")
-    else:
-        st.table(st.session_state.mealplan_df)
+    st.write("---")
 
-# ----------------------------------------------------------------
-# SECTION 3 : GÉNÉRER LA LISTE DE COURSES
-# ----------------------------------------------------------------
-elif section == "Liste de courses":
-    st.header("Liste de courses générée")
-    if st.session_state.mealplan_df.empty:
-        st.info("Veuillez d'abord planifier vos repas.")
-    else:
-        # Agrégation des ingrédients
-        total_ingredients = defaultdict(lambda: {"quantity": 0, "unit": ""})
-        for recette_name in st.session_state.mealplan_df["Recipe"]:
-            row = st.session_state.recipes_df[st.session_state.recipes_df["Name"] == recette_name]
-            if not row.empty:
-                ing_list = parse_ingredients(row.iloc[0]["Ingredients"])
-                for ing in ing_list:
-                    clé = ing["ingredient"]
-                    qty = ing["quantity"]
-                    unit = ing["unit"]
-                    if total_ingredients[clé]["unit"] and total_ingredients[clé]["unit"] != unit:
-                        # Si unités différentes, avertir
-                        st.warning(f"Unité différente pour '{clé}', vérifiez manuellement.")
-                    total_ingredients[clé]["quantity"] += qty
-                    total_ingredients[clé]["unit"] = unit
+    # AFFICHAGE EN DEUX COLONNES
+    cols = st.columns(2)
+    for idx, rec in enumerate(recipes_db[user]):
+        c = cols[idx % 2]
+        if rec["img"]:
+            c.image(rec["img"], width=150)
+        c.subheader(rec["name"])
+        for ing in rec["ings"]:
+            c.write(f"- {ing['name']}: {ing['qty']} {ing['unit']}")
+        if c.button("Supprimer", key=f"delrec{idx}"):
+            recipes_db[user].pop(idx)
+            save_json(RECIPES_FILE, recipes_db)
+            st.experimental_rerun()
+        if c.button("Partager", key=f"sharerec{idx}"):
+            st.info(f"Partage de « {rec['name']} »…")
 
-        # Construction du DataFrame de la liste de courses
-        shopping_data = []
-        for ing, vals in total_ingredients.items():
-            shopping_data.append({
-                "Ingrédient": ing,
-                "Quantité": vals["quantity"],
-                "Unité": vals["unit"]
-            })
-        shopping_df = pd.DataFrame(shopping_data)
-        st.table(shopping_df)
+# ———————————————————————————
+# PAGE “EXTRAS”
+# ———————————————————————————
+elif menu=="Extras":
+    st.title("➕ Extras")
+    with st.expander("+ Ajouter un extra"):
+        with st.form("add_extra"):
+            nom  = st.text_input("Produit")
+            qty  = st.number_input("Quantité")
+            unit = st.selectbox("Unité", ["g","kg","ml","l","pcs"])
+            ok   = st.form_submit_button("Ajouter")
+        if ok and nom.strip():
+            extras_db[user].append({"name":nom.strip(),"qty":qty,"unit":unit})
+            save_json(EXTRAS_FILE, extras_db)
+            st.success("Extra ajouté !")
+            st.experimental_rerun()
 
-# ----------------------------------------------------------------
-# SECTION 4 : IMPRESSION DE LA LISTE DE COURSES
-# ----------------------------------------------------------------
-else:  # section == "Impression"
-    st.header("Liste de courses imprimable")
-    if st.session_state.mealplan_df.empty:
-        st.info("Veuillez d'abord planifier vos repas pour obtenir la liste de courses.")
-    else:
-        total_ingredients = defaultdict(lambda: {"quantity": 0, "unit": ""})
-        for recette_name in st.session_state.mealplan_df["Recipe"]:
-            row = st.session_state.recipes_df[st.session_state.recipes_df["Name"] == recette_name]
-            if not row.empty:
-                ing_list = parse_ingredients(row.iloc[0]["Ingredients"])
-                for ing in ing_list:
-                    clé = ing["ingredient"]
-                    qty = ing["quantity"]
-                    unit = ing["unit"]
-                    total_ingredients[clé]["quantity"] += qty
-                    total_ingredients[clé]["unit"] = unit
+    st.write("---")
+    for i, ex in enumerate(extras_db[user]):
+        c0, c1, c2, c3 = st.columns([4,1,1,1])
+        c0.write(ex["name"])
+        c1.write(ex["qty"])
+        c2.write(ex["unit"])
+        if c3.button("🗑️", key=f"delx{i}"):
+            extras_db[user].pop(i)
+            save_json(EXTRAS_FILE, extras_db)
+            st.experimental_rerun()
 
-        shopping_data = []
-        for ing, vals in total_ingredients.items():
-            shopping_data.append({
-                "Ingrédient": ing,
-                "Quantité": vals["quantity"],
-                "Unité": vals["unit"]
-            })
-        shopping_df = pd.DataFrame(shopping_data)
+# ———————————————————————————
+# PAGE “PLANIFICATEUR”
+# ———————————————————————————
+elif menu=="Planificateur":
+    st.title("📅 Planificateur de la semaine")
+    prof = profiles_db[user] or {}
+    mpd  = prof.get("meals_per_day", 3)
+    days = ["Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi","Dimanche"]
+    cols = st.columns(7)
+    for di, day in enumerate(days):
+        with cols[di]:
+            st.subheader(day)
+            for m in range(mpd):
+                key = f"{day}_{m}"
+                choix = [""] + [r["name"] for r in recipes_db[user]]
+                plans_db[user].setdefault(key, "")
+                plans_db[user][key] = st.selectbox("", choix,
+                    index=choix.index(plans_db[user][key]), key=key)
+    if st.button("Enregistrer le plan"):
+        save_json(PLANS_FILE, plans_db)
+        st.success("Plan enregistré !")
 
-        st.markdown("---")
-        st.write("## Liste de courses à imprimer")
-        st.table(shopping_df)
+# ———————————————————————————
+# PAGE “LISTE DE COURSES”
+# ———————————————————————————
+elif menu=="Liste de courses":
+    st.title("🛒 Liste de courses")
+    shop = {}
+    for key, recname in plans_db[user].items():
+        if not recname: continue
+        rec = next((r for r in recipes_db[user] if r["name"]==recname), None)
+        if rec:
+            for ing in rec["ings"]:
+                k = (ing["name"], ing["unit"])
+                shop[k] = shop.get(k, 0) + ing["qty"]
+    for ex in extras_db[user]:
+        k = (ex["name"], ex["unit"])
+        shop[k] = shop.get(k, 0) + ex["qty"]
 
-# ----------------------------------------------------------------
-# INSTRUCTIONS DANS LA BARRE LATÉRALE
-# ----------------------------------------------------------------
-st.sidebar.markdown("---")
-st.sidebar.write(
-    "**Instructions pour lancer cette app en local :**\n"
-    "1. Installez Streamlit : `pip install streamlit pandas`\n"
-    "2. Placez ce fichier en tant que `app.py` dans votre projet.\n"
-    "3. Lancez : `streamlit run app.py`\n"
-    "4. Ouvrez l’URL locale affichée dans votre navigateur."
-)
+    for (n,u),q in shop.items():
+        st.write(f"- {n}: {q} {u}")
+
+    csv = "Produit,Quantité,Unité\n" + "\n".join(f"{n},{q},{u}" for (n,u),q in shop.items())
+    st.download_button("Télécharger CSV", csv, file_name="liste_courses.csv")
+
+# ———————————————————————————
+# PAGE “CONSEILS”
+# ———————————————————————————
+elif menu=="Conseils":
+    st.title("💡 Conseils & Astuces")
+    for a in [
+        "Planifiez vos courses à l'avance.",
+        "Variez les couleurs dans vos assiettes.",
+        "Préparez des portions à congeler.",
+        "Utilisez des herbes fraîches pour relever vos plats."
+    ]:
+        st.info(a)
+
+# ———————————————————————————
+# PAGE “PROFIL”
+# ———————————————————————————
+elif menu=="Profil":
+    st.title("👤 Profil")
+    prof = profiles_db[user] or {
+        "household":"Solo","children":0,"teens":0,"adults":1,"meals_per_day":3
+    }
+    st.write(f"- Foyer : {prof['household']}")
+    st.write(f"- Enfants : {prof['children']}")
+    st.write(f"- Ados : {prof['teens']}")
+    st.write(f"- Adultes : {prof['adults']}")
+    st.write(f"- Repas/jour : {prof['meals_per_day']}")
+
+    if st.button("Modifier le profil"):
+        st.session_state["edit_prof"] = True
+
+    if st.session_state.get("edit_prof", False):
+        with st.form("form_prof"):
+            h = st.selectbox("Type de foyer", ["Solo","Couple","Famille"],
+                             index=["Solo","Couple","Famille"].index(prof["household"]))
+            c = st.number_input("Enfants", prof["children"], 0, 10)
+            t = st.number_input("Ados", prof["teens"], 0, 10)
+            a = st.number_input("Adultes", prof["adults"], 1, 10)
+            m = st.slider("Repas par jour", 1, 6, prof["meals_per_day"])
+            ok= st.form_submit_button("Valider")
+        if ok:
+            profiles_db[user] = {
+                "household":h, "children":c, "teens":t,
+                "adults":a, "meals_per_day":m
+            }
+            save_json(PROFILES_FILE, profiles_db)
+            st.success("Profil mis à jour !")
+            st.session_state["edit_prof"] = False
+            st.experimental_rerun()
